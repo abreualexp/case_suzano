@@ -19,7 +19,7 @@ function read_data()
     frota = sort(DataFrame(XLSX.readtable(ws,sheet)),[:TRANSPORTADOR])
     global n_transportador = length(unique(frota.TRANSPORTADOR))
     global K = range(1,n_transportador)
-    dict_frota = Dict(zip(frota.TRANSPORTADOR,K))
+    global dict_frota = Dict(zip(frota.TRANSPORTADOR,K))
     global K_min = frota.FROTA_MIN
     global K_max = frota.FROTA_MAX
 
@@ -34,10 +34,10 @@ function read_data()
     up = sort(DataFrame(XLSX.readtable(ws,sheet)),[:UP])
     n_farm = length(unique(up.FAZENDA))
     F = range(1,n_farm)
-    dict_farm = Dict(zip(unique(up.FAZENDA),F))
+    global dict_farm = Dict(zip(unique(up.FAZENDA),F))
     n_up = length(unique(up.UP))
     global U = range(1,n_up)
-    dict_up = Dict(zip(up.UP,U))
+    global dict_up = Dict(zip(up.UP,U))
     insertcols!(up,:DATA_COLHEITA,:DIA_COLHEITA => day.(up.DATA_COLHEITA))
     global up_farm = zeros(Int,n_up)
     for l in 1:size(up)[1]
@@ -81,8 +81,10 @@ using Gurobi
 function model()
     model = Model(Gurobi.Optimizer)
     
-    # set_optimizer_attribute(model,"SolutionLimit", 2)
-    # set_optimizer_attribute(model,"TimeLimit", 1500)
+    set_optimizer_attribute(model,"LogFile", "logfile.txt")
+    # set_optimizer_attribute(model,"SolutionLimit", 1)
+    set_optimizer_attribute(model,"TimeLimit", 3600)
+    set_optimizer_attribute(model,"MIPGap", 0)
     
     @variables model begin
         Q[K,U,T]>=0
@@ -115,15 +117,16 @@ function model()
         c12[u in U], sum(v[r,u,t] for r in K for t in T) == up_vol[u]
         
         c13[r in K,u in U,t in T], v[r,u,t] <= Q[r,u,t]*tempo_ciclo[u,r]*carga[u,r]
-        c14[r in K,u in U,t in T], v[r,u,t] <= up_vol[u]*G[r,u,t]
-        c15[r in K,u in U,t in T], v[r,u,t] >= B[u,t]/up_vol[u] - up_vol[u]*(1 - G[r,u,t])
+        # c14[r in K,u in U,t in T_CL], v[r,u,t] <= Q[r,u,t]*tempo_ciclo_lento[u,r]*carga[u,r]
+        c15[r in K,u in U,t in T], v[r,u,t] <= up_vol[u]*G[r,u,t]
+        c16[r in K,u in U,t in T], v[r,u,t] >= B[u,t]/up_vol[u] - up_vol[u]*(1 - G[r,u,t])
         
-        c16[u in U,t in T], sum(v[r,u,t] for r in K) <= B[u,t]
-        c17[u in U], B[u,H] == sum(v[r,u,H] for r in K)
+        c17[u in U,t in T], sum(v[r,u,t] for r in K) <= B[u,t]
+        c18[u in U], B[u,H] == sum(v[r,u,H] for r in K)
         
-        c17[u in U,t in T0;(t<up_dia[u])], B[u,t] == 0
-        c19[u in U], B[u,up_dia[u]] == up_vol[u]
-        c20[u in U,t in 2:H;(t>up_dia[u])], B[u,t] == B[u,t-1] - sum(v[r,u,t-1] for r in K)
+        c19[u in U,t in T0;(t<up_dia[u])], B[u,t] == 0
+        c20[u in U], B[u,up_dia[u]] == up_vol[u]
+        c21[u in U,t in 2:H;(t>up_dia[u])], B[u,t] == B[u,t-1] - sum(v[r,u,t-1] for r in K)
         
         obj[i in U, u in U,t in T], var_DB[t] >= (up_db[i]*sum(G[r,i,t] for r in K) - up_db[u]*sum(G[r,u,t] for r in K))
 
@@ -144,7 +147,7 @@ function model()
 
     println("\n## Implementação do modelo finalizada\n")
     
-    p_stt = primal_status(model)
+    global p_stt = primal_status(model)
     t_stt = termination_status(model)
     
     println(
@@ -164,15 +167,21 @@ function model()
     print()
 end
 
+using CSV
+
 function write_solution()
 
+    up = Dict(value => key for (key, value) in dict_up)
+    farm = Dict(value => key for (key, value) in dict_farm)
+    frota = Dict(value => key for (key, value) in dict_frota)
+
     for r in K, u in U, t in T
-        if v[r,u,t] > 0
+        if (v[r,u,t] > 0) && (Q[r,u,t] > 0) && (G[r,u,t] > 0)
             out_file = open(out_ws,"a")
             out_text = DataFrame(
-                UP = u,
-                FAZENDA = up_farm[u],
-                TRANSPORTADOR = r,
+                UP = up[u],
+                FAZENDA = farm[up_farm[u]],
+                TRANSPORTADOR = frota[r],
                 DIA = t,
                 DB = up_db[u],
                 RSP = up_rsp[u],
@@ -189,5 +198,7 @@ ws = "generic_input_case.xlsx"
 out_ws = "solution.csv"
 
 read_data()
-# model()
-# write_solution()
+model()
+if p_stt != MOI.NO_SOLUTION
+    write_solution()
+end
